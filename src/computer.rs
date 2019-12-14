@@ -1,100 +1,73 @@
 use std::sync::mpsc::{Sender, Receiver};
-use std::sync::mpsc;
+use std::sync::{mpsc, Arc, Mutex};
 use std::convert::TryInto;
 use std::collections::HashMap;
-
-//const COMMAND_MAX_LENGTH: usize = 4;
 
 #[derive(Debug)]
 pub struct Computer {
     memory: Memory,
+    pub waiting: Arc<Mutex<bool>>,
 }
 
 impl Computer {
     pub fn new(memory: Vec<i64>) -> Self {
-        Self { memory: memory.into() }
+        Self { memory: memory.into(), waiting: Arc::new(Mutex::new(false)) }
     }
 
-    pub fn run(&mut self, input: Receiver<i64>, output: Sender<i64>) {
+    pub fn run(mut self, input: Receiver<i64>, output: Sender<i64>) {
         let mut ptr = 0;
         let mut relative_offset = 0;
         loop {
-            //println!("Pointer: {}", ptr);
-            //println!("Memory: {:?}", self.memory);
             let command = Command::parse(&self.memory, ptr);
-            println!("Running instruction {:?}", command);
+            //println!("Running instruction {:?}", command);
             let mut jumped = false;
             match &command {
                 Command::Add(a, b, c) => {
                     let first_val = a.unwrap(&self.memory, relative_offset);
                     let second_val = b.unwrap(&self.memory, relative_offset);
                     let sum = first_val + second_val;
-                    match c {
-                        Pointer::Position(p) => { *self.memory.get_mut(*p) = sum }
-                        Pointer::Relative(p) => { *self.memory.get_mut((*p + relative_offset).try_into().unwrap()) = sum }
-                        Pointer::Value(_) => { panic!("Can't store value in a literal value") }
-                    }
+                    *c.unwrap_mut(&mut self.memory, relative_offset) = sum;
                 }
                 Command::Multiply(a, b, c) => {
                     let first_val = a.unwrap(&self.memory, relative_offset);
                     let second_val = b.unwrap(&self.memory, relative_offset);
                     let product = first_val * second_val;
-                    match c {
-                        Pointer::Position(p) => { *self.memory.get_mut(*p) = product }
-                        Pointer::Relative(p) => { *self.memory.get_mut((*p + relative_offset).try_into().unwrap()) = product }
-                        Pointer::Value(_) => { panic!("Can't store value in a literal value") }
-                    }
+                    *c.unwrap_mut(&mut self.memory, relative_offset) = product;
                 }
                 Command::Output(a) => {
-                    output.send(a.unwrap(&self.memory, relative_offset)).unwrap();
+                    output.send(*a.unwrap(&self.memory, relative_offset)).unwrap();
                 }
                 Command::Input(a) => {
-                    match a {
-                        Pointer::Value(_) => { panic!("Can't store value in a literal value") }
-                        Pointer::Position(p) => { *self.memory.get_mut(*p) = input.recv().unwrap() }
-                        Pointer::Relative(p) => { *self.memory.get_mut((relative_offset + *p).try_into().unwrap()) = input.recv().unwrap() }
+                    {
+                        *self.waiting.lock().unwrap() = true;
                     }
-                }
+                    //println!("Waiting for input");
+                    *a.unwrap_mut(&mut self.memory, relative_offset) = input.recv().unwrap();
+                    {
+                        *self.waiting.lock().unwrap() = false;
+                    }                }
                 Command::JumpTrue(a, b) => {
-                    if a.unwrap(&self.memory, relative_offset) != 0 {
-                        ptr = b.unwrap(&self.memory, relative_offset) as usize;
+                    if *a.unwrap(&self.memory, relative_offset) != 0 {
+                        ptr = *b.unwrap(&self.memory, relative_offset) as usize;
                         jumped = true;
                     }
                 }
                 Command::JumpFalse(a, b) => {
-                    if a.unwrap(&self.memory, relative_offset) == 0 {
-                        ptr = b.unwrap(&self.memory, relative_offset) as usize;
+                    if *a.unwrap(&self.memory, relative_offset) == 0 {
+                        ptr = *b.unwrap(&self.memory, relative_offset) as usize;
                         jumped = true;
                     }
                 }
                 Command::LessThan(a, b, c) => {
-                    match c {
-                        Pointer::Position(p) => {
-                            *self.memory.get_mut(*p) =
-                                if a.unwrap(&self.memory, relative_offset) < b.unwrap(&self.memory, relative_offset) { 1 } else { 0 }
-                        }
-                        Pointer::Relative(p) => {
-                            *self.memory.get_mut((relative_offset + *p).try_into().unwrap()) =
-                                if a.unwrap(&self.memory, relative_offset) < b.unwrap(&self.memory, relative_offset) { 1 } else { 0 }
-                        }
-                        Pointer::Value(_) => { panic!("Can't store value in a literal value") }
-                    }
+                    *c.unwrap_mut(&mut self.memory, relative_offset) =
+                        if a.unwrap(&self.memory, relative_offset) < b.unwrap(&self.memory, relative_offset) { 1 } else { 0 };
                 }
                 Command::Equals(a, b, c) => {
-                    match c {
-                        Pointer::Position(p) => {
-                            *self.memory.get_mut(*p) =
-                                if a.unwrap(&self.memory, relative_offset) == b.unwrap(&self.memory, relative_offset) { 1 } else { 0 }
-                        }
-                        Pointer::Relative(p) => {
-                            *self.memory.get_mut((relative_offset + *p).try_into().unwrap()) =
-                                if a.unwrap(&self.memory, relative_offset) == b.unwrap(&self.memory, relative_offset) { 1 } else { 0 }
-                        }
-                        Pointer::Value(_) => { panic!("Can't store value in a literal value") }
-                    }
+                    *c.unwrap_mut(&mut self.memory, relative_offset) =
+                        if a.unwrap(&self.memory, relative_offset) == b.unwrap(&self.memory, relative_offset) { 1 } else { 0 };
                 }
                 Command::ChangeOffset(a) => {
-                    let val = a.unwrap(&self.memory, relative_offset) as isize;
+                    let val = *a.unwrap(&self.memory, relative_offset) as isize;
                     relative_offset += val;
                 }
                 Command::Return => { break }
@@ -106,7 +79,7 @@ impl Computer {
         }
     }
 
-    pub fn run_blocking(mut self, input: &[i64]) -> Vec<i64> {
+    pub fn run_blocking(self, input: &[i64]) -> Vec<i64> {
         let (input_transmitter, input_receiver) = mpsc::channel();
         let (output_transmitter, output_receiver) = mpsc::channel();
     
@@ -191,11 +164,19 @@ impl Pointer {
         }
     }
     
-    fn unwrap(&self, program: &Memory, relative_offset: isize) -> i64 {
+    fn unwrap<'a>(&'a self, program: &'a Memory, relative_offset: isize) -> &'a i64 {
         match self {
-            Pointer::Position(p) => { *program.get(*p) }
-            Pointer::Value(v) => { *v }
-            Pointer::Relative(p) => { *program.get((relative_offset + *p).try_into().unwrap()) }
+            Pointer::Position(p) => { program.get(*p) }
+            Pointer::Value(v) => { v }
+            Pointer::Relative(p) => { program.get((relative_offset + *p).try_into().unwrap()) }
+        }
+    }
+
+    fn unwrap_mut<'a>(&self, program: &'a mut Memory, relative_offset: isize) -> &'a mut i64 {
+        match self {
+            Pointer::Position(p) => { program.get_mut(*p) }
+            Pointer::Value(_) => { panic!("Can't mutate constant") }
+            Pointer::Relative(p) => { program.get_mut((relative_offset + *p).try_into().unwrap()) }
         }
     }
 }
